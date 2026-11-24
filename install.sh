@@ -5,7 +5,7 @@
 #   curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@main/install.sh | sudo bash
 #
 # 选项:
-#   --ref REF        从哪个 git ref 取文件(默认 main, 稳定版用 v1.1.0)
+#   --ref REF        从哪个 git ref 取文件(默认本安装器对应的 tag v1.1.2; main=最新)
 #   --prefix DIR     安装前缀, 默认 /usr/local (装到 DIR/bin/netcfg)
 #   --from FILE      用本地 netcfg.sh 安装(离线/开发用, 不下载、不校验)
 #   --base-url URL   自定义下载根, 默认 https://fastly.jsdelivr.net/gh
@@ -18,10 +18,10 @@
 set -euo pipefail
 
 PROG="install.sh"
-INSTALLER_VER="1.1.1"
+INSTALLER_VER="1.1.2"
 GH_REPO="${NETCFG_GH_REPO:-scenep/netcfg}"
 BASE_HOST="${NETCFG_CDN:-https://fastly.jsdelivr.net/gh}"
-REF="main"
+REF=""
 PREFIX="/usr/local"
 FROM_FILE=""
 VERIFY=1
@@ -68,6 +68,7 @@ if [ "${PREFIX%/}" = "/usr/local" ] && [ "$(id -u)" -ne 0 ]; then
   die "安装到 /usr/local 需要 root: 请用 sudo, 或 --prefix 指定可写目录"
 fi
 
+if [ -z "$REF" ]; then REF="v${INSTALLER_VER}"; fi
 BASE_URL="${BASE_HOST%/}/${GH_REPO}@${REF}"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/netcfg-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
@@ -89,7 +90,16 @@ if [ -n "$FROM_FILE" ]; then
   log "使用本地文件: $FROM_FILE"
 else
   log "下载 $BASE_URL/netcfg.sh"
-  try_fetch netcfg.sh "$TMP/netcfg.sh" || die "下载失败(网络不通? 可换 --base-url 或 --from)"
+  if ! try_fetch netcfg.sh "$TMP/netcfg.sh"; then
+    if [ "$REF" != "main" ]; then
+      log "ref=$REF 取不到, 回退 main"
+      REF="main"
+      BASE_URL="${BASE_HOST%/}/${GH_REPO}@${REF}"
+      try_fetch netcfg.sh "$TMP/netcfg.sh" || die "下载失败(网络不通? 可换 --base-url 或 --from)"
+    else
+      die "下载失败(网络不通? 可换 --base-url 或 --from)"
+    fi
+  fi
   if [ "$VERIFY" -eq 1 ]; then
     if try_fetch SHA256SUMS "$TMP/SHA256SUMS"; then
       ( cd "$TMP" && sha256sum -c --ignore-missing SHA256SUMS ) || die "sha256 校验失败, 已中止安装"
