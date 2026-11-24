@@ -3,14 +3,14 @@
 改网卡配置最大的风险是"改完连不上，只能去机房"。`netcfg.sh` 用一条命令改完，
 **改错自动退回去**。
 
-支持 `netplan`（Ubuntu 20.04+）、`ifupdown`（老 Debian/Ubuntu）、`NetworkManager`（nmcli）。
+支持 **Ubuntu 20.04+**（netplan）、**CentOS 7**（NetworkManager 或 network.service/ifcfg）、老 Debian/Ubuntu（ifupdown）。
 
 > 文中的 IP 均为示意，请替换成你自己的。
 
 ## 安装（免费、无依赖）
 
 ```sh
-curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.1.2/install.sh | sudo bash
+curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.0/install.sh | sudo bash
 ```
 
 装到 `/usr/local/bin/netcfg`，然后：
@@ -22,13 +22,13 @@ sudo netcfg show
 安装完**立即**把当前 IP/网关/DNS 固化成静态（真正的一条命令）：
 
 ```sh
-curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.1.2/install.sh | sudo bash -s -- --run "pin -y"
+curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.0/install.sh | sudo bash -s -- --run "pin -y"
 ```
 
 不要安装、直接用：
 
 ```sh
-curl -fsSLO https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.1.2/netcfg.sh
+curl -fsSLO https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.0/netcfg.sh
 sudo bash netcfg.sh show
 ```
 
@@ -39,7 +39,7 @@ curl -fsSLO https://ghproxy.net/https://raw.githubusercontent.com/scenep/netcfg/
 ```
 
 > 为什么主推 jsDelivr：`raw.githubusercontent.com` 在部分国内网络不可达。
-> 上面地址钉在 `v1.1.2`（稳定）；要跟最新就把 `v1.1.2` 换成 `main`，
+> 上面地址钉在 `v1.2.0`（稳定）；要跟最新就把 `v1.2.0` 换成 `main`，
 > 但 CDN 对分支有缓存，可能滞后。
 
 ## 30 秒上手
@@ -55,7 +55,7 @@ sudo netcfg set -i ens33 -4 192.168.1.10/24 -g 192.168.1.1 -d "223.5.5.5 8.8.8.8
 
 sudo netcfg set -i ens33 --dhcp        # 改回 DHCP
 sudo netcfg rollback                  # 回滚到最近一次备份
-netcfg selftest                       # 沙箱自测(48 项, 不改本机网络)
+netcfg selftest                       # 沙箱自测(51 项, 不改本机网络)
 ```
 
 改的正是当前 SSH 那根网卡时，用后台模式（连接断了也不影响校验和确认）：
@@ -63,6 +63,19 @@ netcfg selftest                       # 沙箱自测(48 项, 不改本机网络)
 ```sh
 sudo netcfg --detach set -i ens33 -4 192.168.1.10/24 -g 192.168.1.1 -d "223.5.5.5 8.8.8.8" -y
 tail -f /var/log/netcfg-*.log
+```
+
+## CentOS 7
+
+需要 python3（`yum install -y python3`）；netplan 相关的 PyYAML **不需要**。
+
+- NetworkManager 在跑 → 用 `nmcli` 后端（`device reapply` 就地生效，不断链路）；
+- 传统 server（`network.service` + ifcfg）→ 用 `ifcfg` 后端，写 `/etc/sysconfig/network-scripts/ifcfg-<网卡>` 后 `ifdown/ifup`；
+- bond/bridge/team/vlan 明确拒绝；`ZONE`、`IPV6_*` 等未知键原样保留。
+
+```sh
+sudo netcfg pin            # 固化
+sudo netcfg set -4 192.168.1.10/24 -g 192.168.1.1 -d "223.5.5.5 8.8.8.8"
 ```
 
 ## 为什么敢一键改
@@ -118,7 +131,7 @@ tail -f /var/log/netcfg-*.log
     --strict           ping 网关 / DNS 解析失败也算失败
 -n, --dry-run          只打印，不改文件
 -y, --yes              非交互
--b, --backend B        netplan|ifupdown|nmcli
+-b, --backend B        netplan|nmcli|ifcfg|ifupdown
     --detach[=LOG]     后台执行（改唯一网卡时推荐）
 -V, --version          版本号
 ```
@@ -137,7 +150,7 @@ tail -f /var/log/netcfg-*.log
 ## 自测
 
 ```sh
-netcfg selftest        # 48 项，约 20s，沙箱 + 桩程序，不动本机网络
+netcfg selftest        # 51 项，约 30s，沙箱 + 桩程序，不动本机网络
 ```
 
 覆盖参数校验、静态/DHCP/双栈渲染、多地址、其它网卡保留、幂等、dry-run 不落盘、
