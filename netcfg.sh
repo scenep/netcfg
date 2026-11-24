@@ -30,7 +30,7 @@
 set -euo pipefail
 
 PROG="netcfg.sh"
-VER="1.2.0"
+VER="1.2.1"
 SELF=""
 for _cand in "${BASH_SOURCE[0]:-}" "$0"; do
   if [ -n "$_cand" ] && [ -f "$_cand" ]; then

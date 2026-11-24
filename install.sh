@@ -5,7 +5,7 @@
 #   curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@main/install.sh | sudo bash
 #
 # 选项:
-#   --ref REF        从哪个 git ref 取文件(默认本安装器对应的 tag v1.2.0; main=最新)
+#   --ref REF        从哪个 git ref 取文件(默认本安装器对应的 tag v1.2.1; main=最新)
 #   --prefix DIR     安装前缀, 默认 /usr/local (装到 DIR/bin/netcfg)
 #   --from FILE      用本地 netcfg.sh 安装(离线/开发用, 不下载、不校验)
 #   --base-url URL   自定义下载根, 默认 https://fastly.jsdelivr.net/gh
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 PROG="install.sh"
-INSTALLER_VER="1.2.0"
+INSTALLER_VER="1.2.1"
 GH_REPO="${NETCFG_GH_REPO:-scenep/netcfg}"
 BASE_HOST="${NETCFG_CDN:-https://fastly.jsdelivr.net/gh}"
 REF=""
@@ -102,7 +102,8 @@ else
   fi
   if [ "$VERIFY" -eq 1 ]; then
     if try_fetch SHA256SUMS "$TMP/SHA256SUMS"; then
-      ( cd "$TMP" && sha256sum -c --ignore-missing SHA256SUMS ) || die "sha256 校验失败, 已中止安装"
+      # CentOS 7 的 coreutils 8.22 不支持 --ignore-missing, 直接 -c
+      ( cd "$TMP" && sha256sum -c SHA256SUMS ) || die "sha256 校验失败, 已中止安装"
       log "sha256 校验通过"
     else
       log "警告: 取不到 SHA256SUMS, 跳过校验(可用 --no-verify 显式跳过)"
