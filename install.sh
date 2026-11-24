@@ -9,6 +9,7 @@
 #   --prefix DIR     安装前缀, 默认 /usr/local (装到 DIR/bin/netcfg)
 #   --from FILE      用本地 netcfg.sh 安装(离线/开发用, 不下载、不校验)
 #   --base-url URL   自定义下载根, 默认 https://fastly.jsdelivr.net/gh
+#   --run "ARGS"     安装后立即执行 netcfg ARGS, 如 --run "pin -y"
 #   --no-verify      跳过 sha256 校验(不建议)
 #   --uninstall      卸载
 #   --version        显示安装器版本
@@ -17,7 +18,7 @@
 set -euo pipefail
 
 PROG="install.sh"
-INSTALLER_VER="1.1.0"
+INSTALLER_VER="1.1.1"
 GH_REPO="${NETCFG_GH_REPO:-scenep/netcfg}"
 BASE_HOST="${NETCFG_CDN:-https://fastly.jsdelivr.net/gh}"
 REF="main"
@@ -25,6 +26,7 @@ PREFIX="/usr/local"
 FROM_FILE=""
 VERIFY=1
 UNINSTALL=0
+RUN=""
 
 log() { printf '[install] %s\n' "$*"; }
 die() { printf '[install][错误] %s\n' "$*" >&2; exit 1; }
@@ -40,6 +42,7 @@ while [ $# -gt 0 ]; do
     --from)      FROM_FILE="${2:-}"; shift 2 ;;
     --base-url)  BASE_HOST="${2:-}"; shift 2 ;;
     --no-verify) VERIFY=0; shift ;;
+    --run)       RUN="${2:-}"; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     --version)   printf '%s %s\n' "$PROG" "$INSTALLER_VER"; exit 0 ;;
     -h|--help)   usage; exit 0 ;;
@@ -112,4 +115,12 @@ printf '  sudo netcfg rollback                              # 回滚\n'
 printf '  netcfg selftest                                   # 自测(不改本机网络)\n'
 if [ "${PREFIX%/}" != "/usr/local" ]; then
   printf '\n提示: %s 不在默认 PATH, 请 export PATH="%s:$PATH"\n' "$BIN_DIR" "$BIN_DIR"
+fi
+
+if [ -n "$RUN" ]; then
+  log "安装完成, 继续执行: netcfg $RUN"
+  # 有意做单词拆分, 让 --run "pin -y" 能带参数
+  # shellcheck disable=SC2086
+  set -- $RUN
+  exec "$TARGET" "$@"
 fi

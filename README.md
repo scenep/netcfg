@@ -19,10 +19,16 @@ curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@main/install.sh | sudo b
 sudo netcfg show
 ```
 
+安装完**立即**把当前 IP/网关/DNS 固化成静态（真正的一条命令）：
+
+```sh
+curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@main/install.sh | sudo bash -s -- --run "pin -y"
+```
+
 不要安装、直接用：
 
 ```sh
-curl -fsSLO https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.1.0/netcfg.sh
+curl -fsSLO https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.1.1/netcfg.sh
 sudo bash netcfg.sh show
 ```
 
@@ -47,7 +53,7 @@ sudo netcfg set -i ens33 -4 192.168.1.10/24 -g 192.168.1.1 -d "223.5.5.5 8.8.8.8
 
 sudo netcfg set -i ens33 --dhcp        # 改回 DHCP
 sudo netcfg rollback                  # 回滚到最近一次备份
-netcfg selftest                       # 沙箱自测(45 项, 不改本机网络)
+netcfg selftest                       # 沙箱自测(48 项, 不改本机网络)
 ```
 
 改的正是当前 SSH 那根网卡时，用后台模式（连接断了也不影响校验和确认）：
@@ -129,7 +135,7 @@ tail -f /var/log/netcfg-*.log
 ## 自测
 
 ```sh
-netcfg selftest        # 45 项，约 20s，沙箱 + 桩程序，不动本机网络
+netcfg selftest        # 48 项，约 20s，沙箱 + 桩程序，不动本机网络
 ```
 
 覆盖参数校验、静态/DHCP/双栈渲染、多地址、其它网卡保留、幂等、dry-run 不落盘、

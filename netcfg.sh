@@ -30,8 +30,15 @@
 set -euo pipefail
 
 PROG="netcfg.sh"
-VER="1.1.0"
-SELF=$(readlink -f "$0")
+VER="1.1.1"
+SELF=""
+for _cand in "${BASH_SOURCE[0]:-}" "$0"; do
+  if [ -n "$_cand" ] && [ -f "$_cand" ]; then
+    SELF=$(readlink -f "$_cand" 2>/dev/null || true)
+    break
+  fi
+done
+unset _cand
 
 ROOT="/"                 # 沙箱根目录(仅自测用)
 BACKEND="auto"
@@ -770,12 +777,33 @@ make_backup() {
 }
 
 write_rollback_script() {
-  local bdir="$1"
+  local bdir="$1" apply_cmds=""
+  case "$BACKEND" in
+    netplan)  apply_cmds="netplan apply >/dev/null 2>&1 || true" ;;
+    ifupdown) apply_cmds="ifdown '$IFACE' >/dev/null 2>&1 || true
+ifup '$IFACE' >/dev/null 2>&1 || true" ;;
+    nmcli)    apply_cmds="con=\$(nmcli -t -f NAME,DEVICE connection show 2>/dev/null | awk -F: -v d='$IFACE' '\$NF==d{print; exit}')
+if [ -n \"\$con\" ]; then nmcli connection up \"\${con%:*}\" >/dev/null 2>&1 || true; fi" ;;
+    *)        apply_cmds="true" ;;
+  esac
   cat > "$bdir/rollback.sh" <<EOF
 #!/bin/bash
-# 由 netcfg.sh 自动生成: 还原 $bdir 备份并重新应用网络配置
+# 由 netcfg.sh 自动生成: 还原备份并重新应用网络配置
+# 自包含: 不依赖原脚本位置, 管道执行(curl | bash)时同样可用
 set -u
-exec bash "$SELF" --root "$ROOT" _restore "$bdir"
+ROOT='$ROOT'
+BDIR='$bdir'
+if [ -s "\$BDIR/created.list" ]; then
+  while IFS= read -r f; do
+    [ -n "\$f" ] || continue
+    rm -f "\${ROOT%/}\$f" 2>/dev/null || true
+  done < "\$BDIR/created.list"
+fi
+if [ -f "\$BDIR/etc.tar.gz" ]; then
+  tar -xzf "\$BDIR/etc.tar.gz" -C "\$ROOT" || exit 1
+fi
+$apply_cmds
+echo "[rollback] \$(date '+%F %T') 已还原 \$BDIR"
 EOF
   chmod +x "$bdir/rollback.sh"
 }
@@ -1266,7 +1294,11 @@ cmd_set() {
     fi
     guard_confirm
     printf '\n[netcfg] 配置成功\n'
-    printf '  回滚命令: sudo %s rollback %s\n\n' "$SELF" "$BDIR"
+    if [ -n "$SELF" ]; then
+      printf '  回滚命令: sudo %s rollback %s\n\n' "$SELF" "$BDIR"
+    else
+      printf '  回滚命令: sudo bash %s/rollback.sh\n\n' "$BDIR"
+    fi
     return 0
   fi
 
@@ -1840,6 +1872,31 @@ EOS
     t_ok "--version 输出正确 ($out)"
   else t_no "--version 异常 rc=$rc out=$out"; fi
 
+  # --- 18c. 管道模式(curl | bash): 回滚脚本必须仍然可用 -------------------
+  reset_sbx
+  set +e
+  out=$(PATH="$T/bin:$PATH" NETCFG_SANDBOX=1 NETCFG_VERIFY_TRIES=2 NETCFG_VERIFY_INTERVAL=0 \
+        FAKE_IFACE_ADDRS="192.168.1.50/24" FAKE_ROUTE="default via 192.168.1.1 dev ens33" \
+        bash -s -- --root "$sbx" set -i ens33 -4 192.168.1.50/24 -g 192.168.1.1 -y -t 5 < "$SELF" 2>&1); rc=$?
+  set -e
+  local pipe_bdir; pipe_bdir=$(ls -1d "$sbx/var/backups/netcfg"/*/ 2>/dev/null | tail -1)
+  if [ "$rc" -eq 0 ] && [ -n "$pipe_bdir" ] && ! grep -q 'exec bash' "$pipe_bdir/rollback.sh"; then
+    t_ok "管道模式生成自包含 rollback.sh"
+  else t_no "管道模式 rollback.sh 异常 rc=$rc"; printf '%s\n' "$out" | tail -4 | sed 's/^/      /'; fi
+
+  if [ -n "$pipe_bdir" ] && PATH="$T/bin:$PATH" bash "$pipe_bdir/rollback.sh" >/dev/null 2>&1 \
+     && diff -q "$T/pristine/etc/netplan/00-installer-config.yaml" "$cfg" >/dev/null 2>&1; then
+    t_ok "管道模式的 rollback.sh 能真正回滚"
+  else t_no "管道模式 rollback.sh 执行失败"; fi
+
+  reset_sbx
+  set +e
+  out=$(PATH="$T/bin:$PATH" NETCFG_SANDBOX=1 bash -s -- --root "$sbx" --detach set -i ens33 --dhcp -y < "$SELF" 2>&1); rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "需要脚本是真实文件"; then
+    t_ok "管道模式 --detach 明确报错"
+  else t_no "管道模式 --detach 未报错 rc=$rc"; fi
+
   # --- 19. show 可运行 ---------------------------------------------------
   reset_sbx
   set +e; out=$(PATH="$T/bin:$PATH" bash "$SELF" --root "$sbx" show 2>&1); rc=$?; set -e
@@ -1852,6 +1909,9 @@ EOS
 
 # ---------------------------------------------------------- 后台执行 ---
 detach_self() {
+  if [ -z "$SELF" ] || [ ! -f "$SELF" ]; then
+    die "--detach 需要脚本是真实文件(从管道执行无法后台化): 先 curl -o netcfg.sh, 或先安装 netcfg"
+  fi
   local -a keep=()
   local a log
   for a in "$@"; do
