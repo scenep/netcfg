@@ -30,7 +30,7 @@
 set -euo pipefail
 
 PROG="netcfg.sh"
-VER="1.2.4"
+VER="1.2.5"
 SELF=""
 for _cand in "${BASH_SOURCE[0]:-}" "$0"; do
   if [ -n "$_cand" ] && [ -f "$_cand" ]; then
@@ -81,6 +81,9 @@ WITH_IPV6=0
 NMCLI_HARD=0
 ALLOW_OTHER_PREFIX=0
 PIN_OLD_IP=""
+TARGET_HOSTNAME=""
+SKIP_HOSTS=0
+HOSTNAME_BACKUP_DIR=""
 
 # ---------------------------------------------------------------- 基础工具 ---
 log()  { printf '%s\n' "$*"; }
@@ -172,6 +175,7 @@ set 选项:
       --dhcp6            同时启用 DHCPv6
       --with-ipv6        pin 时一并固化当前全局 IPv6 地址与 IPv6 默认网关
       --allow-other-prefix  pin 换 IP 时允许前缀长度与当前不同(默认必须一致)
+      --hostname NAME    同时修改主机名(网络校验通过后执行, 带备份与 revert.sh)
       --allow-offlink-gateway   允许网关不在本网段(默认拒绝)
   -t, --timeout N        看门狗超时秒数, 默认 120, 0=关闭看门狗
       --no-guard         关闭看门狗
@@ -1491,6 +1495,9 @@ print_plan() {
   printf '后端    : %s\n' "$BACKEND"
   printf '网卡    : %s\n' "$IFACE"
   if [ "$CAPTURE_SOURCE" -eq 1 ]; then printf '来源    : 当前运行态(固化)\n'; fi
+  if [ -n "$TARGET_HOSTNAME" ]; then
+    printf '主机名  : %s -> %s\n' "$(hostname_current)" "$TARGET_HOSTNAME"
+  fi
   if [ -n "$PIN_OLD_IP" ]; then printf '原 IP   : %s(仅改 IP, 同网段)\n' "$PIN_OLD_IP"; fi
   if [ "$MODE" = "dhcp" ]; then printf '模式    : DHCP 自动获取\n'; else printf '模式    : 静态\n'; fi
   if [ ${#ADDRS[@]} -gt 0 ]; then printf 'IPv4    : %s\n' "$(join_list ADDRS)"; fi
@@ -1537,6 +1544,9 @@ cmd_set() {
   if [ ${#SEARCHES[@]} -gt 0 ]; then vargs+=(--search "$(join_list SEARCHES)"); fi
   if [ "$ALLOW_OFFLINK" -eq 1 ]; then vargs+=(--allow-offlink); fi
   python3 "$PY" "${vargs[@]}" >/dev/null
+  if [ -n "$TARGET_HOSTNAME" ]; then
+    python3 "$PY" hostname-check --name "$TARGET_HOSTNAME" >/dev/null
+  fi
 
   print_plan
 
@@ -1600,6 +1610,13 @@ cmd_set() {
       exit 1
     fi
     guard_confirm
+    if [ -n "$TARGET_HOSTNAME" ]; then
+      info "网络已校验通过, 继续修改主机名"
+      if ! hostname_set_internal "$TARGET_HOSTNAME"; then
+        err "主机名修改失败, 但网络配置已生效(可单独重试: $PROG hostname $TARGET_HOSTNAME)"
+        exit 1
+      fi
+    fi
     printf '\n[netcfg] 配置成功\n'
     if [ -n "$SELF" ]; then
       printf '  回滚命令: sudo %s rollback %s\n\n' "$SELF" "$BDIR"
@@ -1680,6 +1697,35 @@ EOF
   chmod +x "$bdir/revert.sh"
 }
 
+# 真正执行改名(无提示/无计划), 供 hostname 子命令与 set/pin --hostname 共用
+hostname_set_internal() {
+  local new="$1" cur ts bdir now
+  cur=$(hostname_current)
+  if [ "$new" = "$cur" ]; then
+    info "主机名已经是 $new, 跳过"
+    return 0
+  fi
+  ts=$(date +%Y%m%d-%H%M%S)
+  bdir="$(real_path /var/backups/netcfg-hostname)/$ts"
+  mkdir -p "$bdir"
+  cp -a "$(real_path /etc/hostname)" "$bdir/hostname" 2>/dev/null || true
+  cp -a "$(real_path /etc/hosts)" "$bdir/hosts" 2>/dev/null || true
+  write_hostname_revert "$bdir"
+  hostname_apply "$new" || { err "设置主机名失败"; return 1; }
+  if [ "$SKIP_HOSTS" -eq 0 ]; then
+    hosts_apply_hostname "$cur" "$new" || warn "更新 /etc/hosts 失败(不影响主机名)"
+  fi
+  now=$(hostname_current)
+  if [ "$now" = "$new" ]; then
+    HOSTNAME_BACKUP_DIR="$bdir"
+    info "主机名已改为: $new"
+    printf '  主机名回退: sudo bash %s/revert.sh\n' "$bdir"
+    return 0
+  fi
+  err "主机名读回不一致: [$now] != [$new]"
+  return 1
+}
+
 cmd_hostname() {
   local new="" skip_hosts=0
   while [ $# -gt 0 ]; do
@@ -1724,28 +1770,8 @@ cmd_hostname() {
     case "$ans" in y|Y|yes|YES) ;; *) info "已取消"; return 0 ;; esac
   fi
 
-  local ts bdir
-  ts=$(date +%Y%m%d-%H%M%S)
-  bdir="$(real_path /var/backups/netcfg-hostname)/$ts"
-  mkdir -p "$bdir"
-  cp -a "$(real_path /etc/hostname)" "$bdir/hostname" 2>/dev/null || true
-  cp -a "$(real_path /etc/hosts)" "$bdir/hosts" 2>/dev/null || true
-  write_hostname_revert "$bdir"
-  info "已备份到 $bdir"
-
-  hostname_apply "$new" || { err "设置主机名失败"; return 1; }
-  if [ "$skip_hosts" -eq 0 ]; then
-    hosts_apply_hostname "$cur" "$new" || warn "更新 /etc/hosts 失败(不影响主机名)"
-  fi
-
-  local now; now=$(hostname_current)
-  if [ "$now" = "$new" ]; then
-    info "主机名已改为: $new"
-    printf '  回退命令: sudo bash %s/revert.sh\n\n' "$bdir"
-    return 0
-  fi
-  err "设置后读回的主机名是 [$now], 不是期望的 [$new]"
-  return 1
+  SKIP_HOSTS="$skip_hosts"
+  hostname_set_internal "$new"
 }
 
 # --------------------------------------------------------------- 固化 ---
@@ -2520,6 +2546,27 @@ EOS
     t_ok "hostname revert.sh 能恢复主机名与 hosts"
   else t_no "hostname revert 失败 rc=$rc"; fi
 
+  # --- 21. set/pin + --hostname 一条命令完成 -----------------------------
+  reset_sbx
+  set +e
+  out=$(FAKE_IFACE_ADDRS="192.168.1.70/24" FAKE_ROUTE="default via 192.168.1.1 dev ens33" \
+        run_nc set -i ens33 -4 192.168.1.70/24 -g 192.168.1.1 --hostname nc-combo -y -t 5 2>&1); rc=$?
+  set -e
+  if [ "$rc" -eq 0 ] && grep -q "192.168.1.70/24" "$cfg" && [ "$(cat "$hf")" = "nc-combo" ] \
+     && grep -qE '^127\.0\.1\.1[[:space:]]+nc-combo$' "$hostsf"; then
+    t_ok "set + --hostname 一条命令同时生效"
+  else t_no "set + --hostname 失败 rc=$rc"; printf '%s\n' "$out" | tail -5 | sed 's/^/      /'; fi
+
+  reset_sbx
+  cp "$cfg" "$T/c.orig"; cp "$hf" "$T/h2.orig"
+  set +e
+  out=$(FAKE_IFACE_ADDRS="192.168.1.71/24" FAKE_ROUTE="default via 192.168.1.1 dev ens33" \
+        run_nc set -i ens33 -4 192.168.1.71/24 -g 192.168.1.1 --hostname "bad..name" -y 2>&1); rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && diff -q "$T/c.orig" "$cfg" >/dev/null 2>&1 && diff -q "$T/h2.orig" "$hf" >/dev/null 2>&1; then
+    t_ok "非法主机名时整条命令不落盘"
+  else t_no "非法主机名未阻断 rc=$rc"; fi
+
   printf '\n== 结果: 通过 %d, 失败 %d, 跳过 %d ==\n' "$pass" "$fail" "$skip"
   if [ "$fail" -ne 0 ]; then printf '自测存在失败项\n'; return 1; fi
   printf '自测全部通过\n'
@@ -2613,6 +2660,7 @@ parse_set_opts() {
       --from-current)  FROM_CURRENT=1; shift ;;
       --with-ipv6)     WITH_IPV6=1; shift ;;
       --allow-other-prefix) ALLOW_OTHER_PREFIX=1; shift ;;
+      --hostname)      TARGET_HOSTNAME="${2:-}"; shift 2 ;;
       --dhcp)          MODE=dhcp; shift ;;
       --dhcp6)         DHCP6=1; shift ;;
       --static)        MODE=static; shift ;;
