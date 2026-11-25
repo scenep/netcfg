@@ -10,7 +10,7 @@
 ## 安装（免费、无依赖）
 
 ```sh
-curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.3/install.sh | sudo bash
+curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.4/install.sh | sudo bash
 ```
 
 装到 `/usr/local/bin/netcfg`，然后：
@@ -22,13 +22,13 @@ sudo netcfg show
 安装完**立即**把当前 IP/网关/DNS 固化成静态（真正的一条命令）：
 
 ```sh
-curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.3/install.sh | sudo bash -s -- --run "pin -y"
+curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.4/install.sh | sudo bash -s -- --run "pin -y"
 ```
 
 不要安装、直接用：
 
 ```sh
-curl -fsSLO https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.3/netcfg.sh
+curl -fsSLO https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.4/netcfg.sh
 sudo bash netcfg.sh show
 ```
 
@@ -39,7 +39,7 @@ curl -fsSLO https://ghproxy.net/https://raw.githubusercontent.com/scenep/netcfg/
 ```
 
 > 为什么主推 jsDelivr：`raw.githubusercontent.com` 在部分国内网络不可达。
-> 上面地址钉在 `v1.2.3`（稳定）；要跟最新就把 `v1.2.3` 换成 `main`，
+> 上面地址钉在 `v1.2.4`（稳定）；要跟最新就把 `v1.2.4` 换成 `main`，
 > 但 CDN 对分支有缓存，可能滞后。
 
 ## 30 秒上手
