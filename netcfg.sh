@@ -30,7 +30,7 @@
 set -euo pipefail
 
 PROG="netcfg.sh"
-VER="1.2.1"
+VER="1.2.2"
 SELF=""
 for _cand in "${BASH_SOURCE[0]:-}" "$0"; do
   if [ -n "$_cand" ] && [ -f "$_cand" ]; then
@@ -79,6 +79,8 @@ CAPTURE_SOURCE=0
 FROM_CURRENT=0
 WITH_IPV6=0
 NMCLI_HARD=0
+ALLOW_OTHER_PREFIX=0
+PIN_OLD_IP=""
 
 # ---------------------------------------------------------------- 基础工具 ---
 log()  { printf '%s\n' "$*"; }
@@ -140,6 +142,7 @@ netcfg.sh - Linux 服务器 IP/网关/DNS 一键配置(带自动回滚)
   netcfg.sh show                          查看当前网卡/IP/路由/DNS 与配置文件
   netcfg.sh set [选项]                     配置网卡(静态或 DHCP)
   netcfg.sh pin [选项]                     把当前运行中的 IP/网关/DNS 固化成静态配置
+                                          加 -4 新IP/前缀 则只换 IP(必须与当前同网段)
   netcfg.sh apply                         重新应用当前配置(带校验与回滚保护)
   netcfg.sh backup                         只做一次备份
   netcfg.sh rollback [备份目录]            回滚到指定/最近一次备份
@@ -167,6 +170,7 @@ set 选项:
       --dhcp             改用 DHCP 自动获取(不再给静态地址)
       --dhcp6            同时启用 DHCPv6
       --with-ipv6        pin 时一并固化当前全局 IPv6 地址与 IPv6 默认网关
+      --allow-other-prefix  pin 换 IP 时允许前缀长度与当前不同(默认必须一致)
       --allow-offlink-gateway   允许网关不在本网段(默认拒绝)
   -t, --timeout N        看门狗超时秒数, 默认 120, 0=关闭看门狗
       --no-guard         关闭看门狗
@@ -560,6 +564,32 @@ def do_ifupdown_stanza(a):
     print("\n".join(lines))
 
 
+def do_subnet_check(a):
+    """pin 只改 IP: 新地址必须落在当前地址所在网段内"""
+    try:
+        base = ipaddress.ip_interface(a.base)
+    except ValueError:
+        die("当前地址不合法: %s" % a.base)
+    if base.version != 4:
+        die("当前地址不是 IPv4: %s" % a.base)
+    net = base.network
+    new = parse_addrs([a.new], 4, '新 IPv4')
+    if not new:
+        die("没有给出 -4 新地址")
+    for n in new:
+        nif = ipaddress.ip_interface(n)
+        if nif.ip not in net:
+            die("新地址 %s 不在当前网段 %s 内; pin 只允许同网段换 IP(跨网段请用 set)" % (n, net))
+        if nif.network.prefixlen != net.prefixlen and not a.allow_other_prefix:
+            die("新地址前缀 /%d 与当前 /%d 不一致; 如确需请加 --allow-other-prefix"
+                % (nif.network.prefixlen, net.prefixlen))
+        if nif.ip == net.network_address:
+            die("不能用网络地址 %s" % nif.ip)
+        if nif.ip == net.broadcast_address:
+            die("不能用广播地址 %s" % nif.ip)
+    print("ok")
+
+
 def do_summary(a):
     load_yaml_module()
     root = a.root
@@ -641,6 +671,11 @@ def main():
     add_common(sp)
     sp.add_argument('--mode', default='static')
 
+    sp = sub.add_parser('subnet-check')
+    sp.add_argument('--base', required=True)
+    sp.add_argument('--new', required=True)
+    sp.add_argument('--allow-other-prefix', action='store_true')
+
     sp = sub.add_parser('summary')
     sp.add_argument('--root', default='/')
 
@@ -653,6 +688,8 @@ def main():
         do_edit_netplan(a)
     elif a.cmd == 'ifupdown-stanza':
         do_ifupdown_stanza(a)
+    elif a.cmd == 'subnet-check':
+        do_subnet_check(a)
     elif a.cmd == 'summary':
         do_summary(a)
 
@@ -1432,6 +1469,7 @@ print_plan() {
   printf '后端    : %s\n' "$BACKEND"
   printf '网卡    : %s\n' "$IFACE"
   if [ "$CAPTURE_SOURCE" -eq 1 ]; then printf '来源    : 当前运行态(固化)\n'; fi
+  if [ -n "$PIN_OLD_IP" ]; then printf '原 IP   : %s(仅改 IP, 同网段)\n' "$PIN_OLD_IP"; fi
   if [ "$MODE" = "dhcp" ]; then printf '模式    : DHCP 自动获取\n'; else printf '模式    : 静态\n'; fi
   if [ ${#ADDRS[@]} -gt 0 ]; then printf 'IPv4    : %s\n' "$(join_list ADDRS)"; fi
   if [ ${#V6S[@]} -gt 0 ]; then printf 'IPv6    : %s\n' "$(join_list V6S)"; fi
@@ -1556,11 +1594,54 @@ cmd_set() {
 }
 
 # --------------------------------------------------------------- 固化 ---
+# 改 IP 前探测地址是否已被占用(arping 优先; 失败只告警)
+pin_dup_check() {
+  local a ip
+  if [ "$ROOT" != "/" ]; then return 0; fi
+  for a in "$@"; do
+    ip="${a%/*}"
+    if command -v arping >/dev/null 2>&1; then
+      if arping -D -c 2 -w 2 -I "$IFACE" "$ip" >/dev/null 2>&1; then
+        vlog "arping: $ip 看起来空闲"
+      else
+        warn "地址 $ip 有 ARP 响应, 可能已被占用, 请确认后再执行"
+      fi
+    elif ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
+      warn "地址 $ip 当前 ping 有响应, 可能已被占用, 请确认后再执行"
+    fi
+  done
+  return 0
+}
+
 cmd_pin() {
-  if [ ${#ADDRS[@]} -gt 0 ] || [ "$MODE" = "dhcp" ]; then
-    die "pin 不接受 -4/--dhcp: 它只把当前运行态固化成静态配置(要改地址请用 set)"
+  if [ "$MODE" = "dhcp" ]; then
+    die "pin 不接受 --dhcp: 要切回 DHCP 请用 set --dhcp"
   fi
+  local -a user4=() user6=()
+  local _ua
+  # bash 4.2 下空数组 "${arr[@]}" 在 set -u 时会报 unbound, 必须加长度守卫
+  if [ ${#ADDRS[@]} -gt 0 ]; then
+    for _ua in "${ADDRS[@]}"; do if [ -n "$_ua" ]; then user4+=("$_ua"); fi; done
+  fi
+  if [ ${#V6S[@]} -gt 0 ]; then
+    for _ua in "${V6S[@]}"; do if [ -n "$_ua" ]; then user6+=("$_ua"); fi; done
+  fi
+  ADDRS=(); V6S=()
   capture_current
+  local -a cur4=("${ADDRS[@]-}")
+  if [ ${#user4[@]} -gt 0 ]; then
+    ensure_py
+    local -a sargs=(subnet-check --base "${cur4[0]}" --new "$(join_list user4)")
+    if [ "$ALLOW_OTHER_PREFIX" -eq 1 ]; then sargs+=(--allow-other-prefix); fi
+    python3 "$PY" "${sargs[@]}" >/dev/null || die "新 IP 校验未通过, 已放弃"
+    pin_dup_check "${user4[@]}" || true
+    ADDRS=("${user4[@]}")
+    PIN_OLD_IP="${cur4[0]}"
+    warn "仅改 IP: ${cur4[0]} -> $(join_list ADDRS); 网关/DNS/搜索域/MTU 沿用当前配置"
+  fi
+  if [ ${#user6[@]} -gt 0 ]; then
+    V6S=("${user6[@]}")
+  fi
   if [ "$WITH_IPV6" -eq 0 ]; then
     local v6now
     v6now=$(ip -o -6 addr show dev "$IFACE" scope global 2>/dev/null | grep -vE 'temporary|deprecated' | wc -l || true)
@@ -1945,11 +2026,45 @@ EOS
     t_ok "pin -n 只打印不落盘"
   else t_no "pin -n 落盘了 rc=$rc"; fi
 
+  # pin -4: 只换 IP, 必须同网段
   reset_sbx
   set +e
-  out=$(run_nc pin -4 10.0.0.5/24 -y 2>&1); rc=$?
+  out=$(FAKE_IFACE_ADDRS="192.168.1.10/24 192.168.1.50/24" FAKE_ROUTE="default via 192.168.1.1 dev ens33" \
+        FAKE_RESOLVECTL_DNS="Link 2 (ens33): 223.5.5.5 8.8.8.8" \
+        run_nc pin -4 192.168.1.50/24 -y -t 5 2>&1); rc=$?
   set -e
-  if [ "$rc" -ne 0 ]; then t_ok "pin 拒绝 -4 参数"; else t_no "pin 接受 -4 参数"; fi
+  if [ "$rc" -eq 0 ] && grep -q "192.168.1.50/24" "$cfg" && grep -q "via: 192.168.1.1" "$cfg" \
+     && grep -q "223.5.5.5" "$cfg" && ! grep -q "192.168.1.10/24" "$cfg" \
+     && printf '%s' "$out" | grep -q "原 IP"; then
+    t_ok "pin -4 同网段换 IP(网关/DNS 沿用当前)"
+  else t_no "pin -4 同网段换 IP 失败 rc=$rc"; printf '%s\n' "$out" | tail -6 | sed 's/^/      /'; fi
+
+  reset_sbx
+  set +e
+  out=$(FAKE_IFACE_ADDRS="192.168.1.10/24" FAKE_ROUTE="default via 192.168.1.1 dev ens33" \
+        run_nc pin -4 10.0.0.5/24 -y 2>&1); rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "不在当前网段"; then
+    t_ok "pin -4 跨网段被拒绝"
+  else t_no "pin -4 跨网段未拒绝 rc=$rc"; fi
+
+  reset_sbx
+  set +e
+  out=$(FAKE_IFACE_ADDRS="192.168.1.10/24" FAKE_ROUTE="default via 192.168.1.1 dev ens33" \
+        run_nc pin -4 192.168.1.255/24 -y 2>&1); rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "广播地址"; then
+    t_ok "pin -4 广播地址被拒绝"
+  else t_no "pin -4 广播地址未拒绝 rc=$rc"; fi
+
+  reset_sbx
+  set +e
+  out=$(FAKE_IFACE_ADDRS="192.168.1.10/24" FAKE_ROUTE="default via 192.168.1.1 dev ens33" \
+        run_nc pin -4 192.168.1.50/16 -y 2>&1); rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "前缀"; then
+    t_ok "pin -4 前缀不一致被拒绝"
+  else t_no "pin -4 前缀不一致未拒绝 rc=$rc"; fi
 
   reset_sbx
   set +e
@@ -2295,6 +2410,7 @@ parse_set_opts() {
       -m|--mtu)        MTU="${2:-}"; shift 2 ;;
       --from-current)  FROM_CURRENT=1; shift ;;
       --with-ipv6)     WITH_IPV6=1; shift ;;
+      --allow-other-prefix) ALLOW_OTHER_PREFIX=1; shift ;;
       --dhcp)          MODE=dhcp; shift ;;
       --dhcp6)         DHCP6=1; shift ;;
       --static)        MODE=static; shift ;;

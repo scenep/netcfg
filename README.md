@@ -10,7 +10,7 @@
 ## 安装（免费、无依赖）
 
 ```sh
-curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.1/install.sh | sudo bash
+curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.2/install.sh | sudo bash
 ```
 
 装到 `/usr/local/bin/netcfg`，然后：
@@ -22,13 +22,13 @@ sudo netcfg show
 安装完**立即**把当前 IP/网关/DNS 固化成静态（真正的一条命令）：
 
 ```sh
-curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.1/install.sh | sudo bash -s -- --run "pin -y"
+curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.2/install.sh | sudo bash -s -- --run "pin -y"
 ```
 
 不要安装、直接用：
 
 ```sh
-curl -fsSLO https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.1/netcfg.sh
+curl -fsSLO https://fastly.jsdelivr.net/gh/scenep/netcfg@v1.2.2/netcfg.sh
 sudo bash netcfg.sh show
 ```
 
@@ -39,7 +39,7 @@ curl -fsSLO https://ghproxy.net/https://raw.githubusercontent.com/scenep/netcfg/
 ```
 
 > 为什么主推 jsDelivr：`raw.githubusercontent.com` 在部分国内网络不可达。
-> 上面地址钉在 `v1.2.1`（稳定）；要跟最新就把 `v1.2.1` 换成 `main`，
+> 上面地址钉在 `v1.2.2`（稳定）；要跟最新就把 `v1.2.2` 换成 `main`，
 > 但 CDN 对分支有缓存，可能滞后。
 
 ## 30 秒上手
@@ -55,7 +55,7 @@ sudo netcfg set -i ens33 -4 192.168.1.10/24 -g 192.168.1.1 -d "223.5.5.5 8.8.8.8
 
 sudo netcfg set -i ens33 --dhcp        # 改回 DHCP
 sudo netcfg rollback                  # 回滚到最近一次备份
-netcfg selftest                       # 沙箱自测(51 项, 不改本机网络)
+netcfg selftest                       # 沙箱自测(54 项, 不改本机网络)
 ```
 
 改的正是当前 SSH 那根网卡时，用后台模式（连接断了也不影响校验和确认）：
@@ -77,6 +77,17 @@ tail -f /var/log/netcfg-*.log
 sudo netcfg pin            # 固化
 sudo netcfg set -4 192.168.1.10/24 -g 192.168.1.1 -d "223.5.5.5 8.8.8.8"
 ```
+
+### 只换 IP（同网段）
+
+`pin` 支持只改 IP，网关/DNS/搜索域/MTU 全部沿用当前运行态；新 IP 必须与当前 IP 同网段：
+
+```sh
+sudo netcfg pin -4 192.168.1.50/24          # 仅换 IP，其余沿用
+sudo netcfg pin -4 192.168.1.50/24 --allow-other-prefix   # 允许改前缀长度(谨慎)
+```
+
+不同网段会被拒绝；会做 arping/ping 占用探测（有响应会告警）。
 
 ## 为什么敢一键改
 
@@ -150,7 +161,7 @@ sudo netcfg set -4 192.168.1.10/24 -g 192.168.1.1 -d "223.5.5.5 8.8.8.8"
 ## 自测
 
 ```sh
-netcfg selftest        # 51 项，约 30s，沙箱 + 桩程序，不动本机网络
+netcfg selftest        # 54 项，约 30s，沙箱 + 桩程序，不动本机网络
 ```
 
 覆盖参数校验、静态/DHCP/双栈渲染、多地址、其它网卡保留、幂等、dry-run 不落盘、
