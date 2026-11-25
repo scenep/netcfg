@@ -5,7 +5,7 @@
 #   curl -fsSL https://fastly.jsdelivr.net/gh/scenep/netcfg@main/install.sh | sudo bash
 #
 # 选项:
-#   --ref REF        从哪个 git ref 取文件(默认本安装器对应的 tag v1.2.2; main=最新)
+#   --ref REF        从哪个 git ref 取文件(默认本安装器对应的 tag v1.2.3; main=最新)
 #   --prefix DIR     安装前缀, 默认 /usr/local (装到 DIR/bin/netcfg)
 #   --from FILE      用本地 netcfg.sh 安装(离线/开发用, 不下载、不校验)
 #   --base-url URL   自定义下载根, 默认 https://fastly.jsdelivr.net/gh
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 PROG="install.sh"
-INSTALLER_VER="1.2.2"
+INSTALLER_VER="1.2.3"
 GH_REPO="${NETCFG_GH_REPO:-scenep/netcfg}"
 BASE_HOST="${NETCFG_CDN:-https://fastly.jsdelivr.net/gh}"
 REF=""

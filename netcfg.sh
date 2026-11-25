@@ -30,7 +30,7 @@
 set -euo pipefail
 
 PROG="netcfg.sh"
-VER="1.2.2"
+VER="1.2.3"
 SELF=""
 for _cand in "${BASH_SOURCE[0]:-}" "$0"; do
   if [ -n "$_cand" ] && [ -f "$_cand" ]; then
@@ -144,6 +144,7 @@ netcfg.sh - Linux 服务器 IP/网关/DNS 一键配置(带自动回滚)
   netcfg.sh pin [选项]                     把当前运行中的 IP/网关/DNS 固化成静态配置
                                           加 -4 新IP/前缀 则只换 IP(必须与当前同网段)
   netcfg.sh apply                         重新应用当前配置(带校验与回滚保护)
+  netcfg.sh hostname [新名字]               查看/修改主机名(带备份, 可 revert)
   netcfg.sh backup                         只做一次备份
   netcfg.sh rollback [备份目录]            回滚到指定/最近一次备份
   netcfg.sh selftest                       沙箱自测(不改本机网络)
@@ -564,6 +565,22 @@ def do_ifupdown_stanza(a):
     print("\n".join(lines))
 
 
+HOSTNAME_RE = re.compile(r'^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.?$')
+
+
+def do_hostname_check(a):
+    n = (a.name or '').strip()
+    if not n:
+        die("主机名不能为空")
+    if len(n) > 253:
+        die("主机名过长(>253)")
+    if not HOSTNAME_RE.match(n):
+        die("非法主机名: %s (只允许字母/数字/-/., 每个标签 1-63 位且不能以 - 开头或结尾)" % n)
+    if n.lower() in ('localhost', 'localhost.localdomain'):
+        die("不建议把主机名设成 %s" % n)
+    print("ok")
+
+
 def do_subnet_check(a):
     """pin 只改 IP: 新地址必须落在当前地址所在网段内"""
     try:
@@ -671,6 +688,9 @@ def main():
     add_common(sp)
     sp.add_argument('--mode', default='static')
 
+    sp = sub.add_parser('hostname-check')
+    sp.add_argument('--name', required=True)
+
     sp = sub.add_parser('subnet-check')
     sp.add_argument('--base', required=True)
     sp.add_argument('--new', required=True)
@@ -688,6 +708,8 @@ def main():
         do_edit_netplan(a)
     elif a.cmd == 'ifupdown-stanza':
         do_ifupdown_stanza(a)
+    elif a.cmd == 'hostname-check':
+        do_hostname_check(a)
     elif a.cmd == 'subnet-check':
         do_subnet_check(a)
     elif a.cmd == 'summary':
@@ -1593,6 +1615,139 @@ cmd_set() {
   exit 1
 }
 
+# ------------------------------------------------------------ 主机名 ---
+hostname_current() {
+  local f; f=$(real_path /etc/hostname)
+  if [ "$ROOT" != "/" ]; then
+    if [ -f "$f" ]; then cat "$f"; else echo unknown; fi
+    return 0
+  fi
+  hostname 2>/dev/null || { [ -f "$f" ] && cat "$f" || echo unknown; }
+}
+
+hostname_apply() {
+  local n="$1" f
+  f=$(real_path /etc/hostname)
+  if [ "$ROOT" != "/" ]; then
+    printf '%s\n' "$n" > "$f"
+    return 0
+  fi
+  if command -v hostnamectl >/dev/null 2>&1; then
+    hostnamectl set-hostname "$n"
+  else
+    printf '%s\n' "$n" > "$f"
+    hostname "$n"
+  fi
+}
+
+# 同步 /etc/hosts: 替换 127.0.1.1 记录, 并替换旧名字出现在别处的情况
+hosts_apply_hostname() {
+  local old="$1" new="$2" f tmp
+  f=$(real_path /etc/hosts)
+  [ -f "$f" ] || return 0
+  tmp="$f.netcfg.tmp"
+  awk -v old="$old" -v new="$new" '
+    $1 == "127.0.1.1" { print "127.0.1.1\t" new; next }
+    {
+      for (i = 1; i <= NF; i++) if ($i == old) $i = new
+      print
+    }' "$f" > "$tmp" || return 1
+  grep -qE '^[[:space:]]*127\.0\.1\.1[[:space:]]' "$tmp" || printf '127.0.1.1\t%s\n' "$new" >> "$tmp"
+  mv -f "$tmp" "$f"
+  if command -v restorecon >/dev/null 2>&1; then restorecon "$f" >/dev/null 2>&1 || true; fi
+  return 0
+}
+
+write_hostname_revert() {
+  local bdir="$1"
+  cat > "$bdir/revert.sh" <<EOF
+#!/bin/bash
+# 由 netcfg.sh 生成: 恢复主机名与 /etc/hosts
+set -u
+ROOT='$ROOT'
+BDIR='$bdir'
+[ -f "\$BDIR/hostname" ] && cp -a "\$BDIR/hostname" "\${ROOT%/}/etc/hostname"
+[ -f "\$BDIR/hosts" ] && cp -a "\$BDIR/hosts" "\${ROOT%/}/etc/hosts"
+if [ "\$ROOT" = "/" ]; then
+  if command -v hostnamectl >/dev/null 2>&1; then
+    hostnamectl set-hostname "\$(cat /etc/hostname)"
+  else
+    hostname "\$(cat /etc/hostname)"
+  fi
+fi
+echo "[hostname] 已恢复: \$(cat "\${ROOT%/}/etc/hostname")"
+EOF
+  chmod +x "$bdir/revert.sh"
+}
+
+cmd_hostname() {
+  local new="" skip_hosts=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n|--dry-run) DRY_RUN=1; shift ;;
+      -y|--yes)     YES=1; shift ;;
+      --without-hosts) skip_hosts=1; shift ;;
+      -h|--help)    usage; exit 0 ;;
+      -*)           die "未知参数: $1" ;;
+      *)            new="$1"; shift ;;
+    esac
+  done
+  local cur; cur=$(hostname_current)
+  if [ -z "$new" ]; then
+    printf '当前主机名: %s\n' "$cur"
+    printf '静态文件  : %s\n' "$(real_path /etc/hostname)"
+    printf '修改方法  : sudo %s hostname <新名字>\n' "$PROG"
+    return 0
+  fi
+  ensure_py
+  python3 "$PY" hostname-check --name "$new" >/dev/null
+  if [ "$DRY_RUN" -ne 1 ]; then require_root; fi
+
+  printf '\n===== 主机名变更计划 =====\n'
+  printf '当前    : %s\n' "$cur"
+  printf '新的    : %s\n' "$new"
+  if [ "$skip_hosts" -eq 1 ]; then
+    printf '/etc/hosts: 不改\n'
+  else
+    printf '/etc/hosts: 同步 127.0.1.1 记录与旧名字\n'
+  fi
+  printf '备份到  : %s\n' "$(real_path /var/backups/netcfg-hostname)/<时间戳>"
+  printf '==========================\n\n'
+
+  if [ "$new" = "$cur" ]; then info "主机名没变化, 什么都不做"; return 0; fi
+  if [ "$DRY_RUN" -eq 1 ]; then info "演练模式, 未做任何修改"; return 0; fi
+  if [ "$YES" -ne 1 ]; then
+    if [ ! -t 0 ]; then die "非交互环境请加 -y"; fi
+    local ans
+    printf '确认修改主机名 %s -> %s ? [y/N] ' "$cur" "$new"
+    read -r ans || ans=""
+    case "$ans" in y|Y|yes|YES) ;; *) info "已取消"; return 0 ;; esac
+  fi
+
+  local ts bdir
+  ts=$(date +%Y%m%d-%H%M%S)
+  bdir="$(real_path /var/backups/netcfg-hostname)/$ts"
+  mkdir -p "$bdir"
+  cp -a "$(real_path /etc/hostname)" "$bdir/hostname" 2>/dev/null || true
+  cp -a "$(real_path /etc/hosts)" "$bdir/hosts" 2>/dev/null || true
+  write_hostname_revert "$bdir"
+  info "已备份到 $bdir"
+
+  hostname_apply "$new" || { err "设置主机名失败"; return 1; }
+  if [ "$skip_hosts" -eq 0 ]; then
+    hosts_apply_hostname "$cur" "$new" || warn "更新 /etc/hosts 失败(不影响主机名)"
+  fi
+
+  local now; now=$(hostname_current)
+  if [ "$now" = "$new" ]; then
+    info "主机名已改为: $new"
+    printf '  回退命令: sudo bash %s/revert.sh\n\n' "$bdir"
+    return 0
+  fi
+  err "设置后读回的主机名是 [$now], 不是期望的 [$new]"
+  return 1
+}
+
 # --------------------------------------------------------------- 固化 ---
 # 改 IP 前探测地址是否已被占用(arping 优先; 失败只告警)
 pin_dup_check() {
@@ -1824,6 +1979,13 @@ EOS
   chmod +x "$T/bin"/*
 
   local sbx="$T/root"
+  mkdir -p "$sbx/etc"
+  printf 'oldbox\n' > "$sbx/etc/hostname"
+  cat > "$sbx/etc/hosts" <<'EOS'
+127.0.0.1 localhost localhost.localdomain
+127.0.1.1 oldbox
+::1 localhost
+EOS
   cat > "$sbx/etc/netplan/00-installer-config.yaml" <<'EOS'
 network:
   version: 2
@@ -2319,6 +2481,45 @@ EOS
   set +e; out=$(PATH="$T/bin:$PATH" bash "$SELF" --root "$sbx" show 2>&1); rc=$?; set -e
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "ens33"; then t_ok "show 输出正常"; else t_no "show 异常 rc=$rc"; fi
 
+  # --- 20. hostname 修改(沙箱) -------------------------------------------
+  reset_sbx
+  local hf="$sbx/etc/hostname" hostsf="$sbx/etc/hosts"
+  set +e
+  out=$(run_nc hostname nc-test -y 2>&1); rc=$?
+  set -e
+  if [ "$rc" -eq 0 ] && [ "$(cat "$hf")" = "nc-test" ] \
+     && grep -qE '^127\.0\.1\.1[[:space:]]+nc-test$' "$hostsf" && ! grep -q oldbox "$hostsf" \
+     && [ -f "$(ls -1d "$sbx/var/backups/netcfg-hostname"/*/ 2>/dev/null | tail -1)revert.sh" ]; then
+    t_ok "hostname 修改(同步 /etc/hosts, 生成 revert.sh)"
+  else t_no "hostname 修改异常 rc=$rc"; sed -n '1,4p' "$hostsf" | sed 's/^/      /'; fi
+
+  reset_sbx
+  set +e
+  out=$(run_nc hostname "bad..name" -y 2>&1); rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "非法主机名"; then
+    t_ok "非法主机名被拒绝"
+  else t_no "非法主机名未拒绝 rc=$rc"; fi
+
+  reset_sbx
+  cp "$hf" "$T/h.orig"; cp "$hostsf" "$T/hosts.orig"
+  set +e
+  out=$(run_nc hostname nc-dry -n 2>&1); rc=$?
+  set -e
+  if [ "$rc" -eq 0 ] && diff -q "$T/h.orig" "$hf" >/dev/null 2>&1 && diff -q "$T/hosts.orig" "$hostsf" >/dev/null 2>&1; then
+    t_ok "hostname -n 只打印不落盘"
+  else t_no "hostname -n 落盘了 rc=$rc"; fi
+
+  reset_sbx
+  set +e
+  out=$(run_nc hostname nc-rev -y 2>&1); rc=$?
+  set -e
+  local rev; rev=$(ls -1d "$sbx/var/backups/netcfg-hostname"/*/ 2>/dev/null | tail -1)revert.sh
+  if [ "$rc" -eq 0 ] && [ -f "$rev" ] && bash "$rev" >/dev/null 2>&1 \
+     && [ "$(cat "$hf")" = "oldbox" ] && grep -q oldbox "$hostsf"; then
+    t_ok "hostname revert.sh 能恢复主机名与 hosts"
+  else t_no "hostname revert 失败 rc=$rc"; fi
+
   printf '\n== 结果: 通过 %d, 失败 %d, 跳过 %d ==\n' "$pass" "$fail" "$skip"
   if [ "$fail" -ne 0 ]; then printf '自测存在失败项\n'; return 1; fi
   printf '自测全部通过\n'
@@ -2387,6 +2588,7 @@ main() {
     set|config)  parse_set_opts "$@"; if [ "$FROM_CURRENT" -eq 1 ]; then capture_current; fi; cmd_set ;;
     pin|freeze|from-current) parse_set_opts "$@"; cmd_pin ;;
     apply)       parse_set_opts "$@"; cmd_apply ;;
+    hostname|host) cmd_hostname "$@" ;;
     backup)      cmd_backup ;;
     rollback|restore) cmd_rollback "${1:-}" ;;
     _restore)    restore_backup "${1:-}" ;;
